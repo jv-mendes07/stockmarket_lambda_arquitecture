@@ -1,0 +1,274 @@
+
+# =========================
+# SHARED AIRFLOW CONFIG
+# =========================
+x-airflow-common: &airflow-common
+  image: apache/airflow:2.9.2-python3.10
+  user: "${AIRFLOW_UID:-50000}:0"
+  environment: &airflow-common-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-postgres:5432/airflow
+    AIRFLOW__CORE__FERNET_KEY: ''
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
+    AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+    _PIP_ADDITIONAL_REQUIREMENTS: ${_PIP_ADDITIONAL_REQUIREMENTS:- pandas confluent-kafka yfinance boto3 snowflake-connector-python minio}
+    MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY}
+    MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
+    MINIO_BUCKET: ${MINIO_BUCKET}
+    MINIO_ENDPOINT: ${MINIO_ENDPOINT}
+    S3_ENDPOINT: ${S3_ENDPOINT}
+    SNOWFLAKE_ACCOUNT: ${SNOWFLAKE_ACCOUNT}
+    SNOWFLAKE_USER: ${SNOWFLAKE_USER}
+    SNOWFLAKE_PASSWORD: ${SNOWFLAKE_PASSWORD}
+    SNOWFLAKE_DATABASE: ${SNOWFLAKE_DATABASE}
+    SNOWFLAKE_SCHEMA: ${SNOWFLAKE_SCHEMA}
+    SNOWFLAKE_WAREHOUSE: ${SNOWFLAKE_WAREHOUSE}
+    SNOWFLAKE_TABLE: ${SNOWFLAKE_TABLE}
+    KAFKA_BOOTSTRAP_SERVER_AIRFLOW: ${KAFKA_BOOTSTRAP_SERVER_AIRFLOW}
+    KAFKA_TOPIC_REALTIME: ${KAFKA_TOPIC_REALTIME}
+    KAFKA_TOPIC_BATCH: ${KAFKA_TOPIC_BATCH}
+    KAFKA_GROUP_BATCH_ID: ${KAFKA_GROUP_BATCH_ID}
+    KAFKA_GROUP_REALTIME_ID: ${KAFKA_GROUP_REALTIME_ID}
+  volumes:
+    - ./src/airflow/dags:/opt/airflow/dags
+    - ./src/airflow/logs:/opt/airflow/logs
+    - ./src/airflow/plugins:/opt/airflow/plugins
+    - ./src/airflow/requirements:/opt/airflow/requirements
+    - ./src/airflow/reports:/opt/airflow/reports
+    - /var/run/docker.sock:/var/run/docker.sock
+  depends_on:
+    airflow-postgres:
+      condition: service_healthy
+  networks:
+    - airflow-net
+
+services:
+  # =========================
+  # POSTGRESQL 13
+  # =========================
+  airflow-postgres:
+    image: postgres:13
+    container_name: airflow-postgres
+    restart: always
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - postgres-db-volume:/var/lib/postgresql/data
+    ports:
+      - "5433:5432"
+    networks:
+      - airflow-net
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 5s
+      retries: 5
+
+  # =========================
+  # ZOOKEEPER
+  # =========================
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.6.0
+    container_name: zookeeper
+    restart: always
+    ports:
+      - "2181:2181"
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    volumes:
+      - ./data/zookeeper/data:/var/lib/zookeeper/data
+      - ./data/zookeeper/log:/var/lib/zookeeper/log
+    networks:
+      - airflow-net
+
+  # =========================
+  # KAFKA
+  # =========================
+  kafka:
+    image: confluentinc/cp-kafka:7.6.0
+    container_name: kafka
+    depends_on:
+      - zookeeper
+    restart: always
+    ports:
+      - "9092:9092"
+      - "29092:29092"   # Localhost access
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+    volumes:
+      - ./data/kafka:/var/lib/kafka/data
+    networks:
+      - airflow-net
+
+  # =========================
+  # MINIO
+  # =========================
+  minio:
+    image: minio/minio:latest
+    container_name: minio
+    restart: always
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    volumes:
+      - ./data/minio:/data
+    command: server /data --console-address ":9001"
+    networks:
+      - airflow-net
+
+  minio-mc:
+    image: minio/mc:latest
+    depends_on:
+      - minio
+    entrypoint: >
+      /bin/sh -c "
+      sleep 5;
+      mc config host add myminio http://minio:9000 minioadmin minioadmin;
+      mc mb -p myminio/stock-market-data;
+      mc policy set public myminio/stock-market-data;
+      exit 0;
+      "
+    networks:
+      - airflow-net
+
+  # =========================
+  # SPARK MASTER
+  # =========================
+
+  spark-master:
+    image: custom-spark:3.4.2
+    container_name: spark-master
+    command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.master.Master", "--host", "spark-master"]
+    ports:
+      - "8085:8080"
+      - "7077:7077"
+    environment:
+      SPARK_EXTRA_CLASSPATH: /opt/spark/jars/*
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
+      MINIO_BUCKET: ${MINIO_BUCKET}
+      MINIO_ENDPOINT: ${MINIO_ENDPOINT}
+    volumes:
+      - ./src/spark/jobs:/opt/spark/jobs
+      - ./data/spark:/opt/spark/data
+    restart: always
+    networks:
+      - airflow-net
+
+# =========================
+# SPARK WORKER  
+# =========================
+  spark-worker:
+    image: custom-spark:3.4.2
+    container_name: spark-worker
+    depends_on:
+      - spark-master
+    command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.worker.Worker", "spark://spark-master:7077"]
+    ports:
+      - "8086:8081"
+    environment:
+      - SPARK_WORKER_MEMORY=2g
+      - SPARK_WORKER_CORES=2
+      - SPARK_EXTRA_CLASSPATH=/opt/spark/jars/*
+    volumes:
+      - ./src/spark/jobs:/opt/spark/jobs
+      - ./data/spark:/opt/spark/data
+    restart: always
+    networks:
+      - airflow-net
+
+# =========================
+# SPARK CLIENT 
+# =========================
+  spark-client:
+    build:
+      context: .
+      dockerfile: src/spark/spark-client/Dockerfile
+    image: custom-spark:3.4.2
+    container_name: spark-client
+    user: root
+    environment:
+      SPARK_MASTER_URL: spark://spark-master:7077
+      HOME: /home/spark
+      SPARK_USER: root
+      SPARK_LOCAL_DIRS: /tmp
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
+      MINIO_BUCKET: ${MINIO_BUCKET}
+      MINIO_ENDPOINT: ${MINIO_ENDPOINT_SPARK}
+      SPARK_EXTRA_CLASSPATH: /opt/spark/jars/*
+    command: sleep infinity
+    depends_on:
+      - spark-master
+    volumes:
+      - ./src/spark/jobs:/opt/spark/jobs
+      - ./src/airflow/dags/scripts:/opt/airflow/dags/scripts
+      - ./data/spark:/opt/spark/data
+    networks:
+      - airflow-net
+
+  # =========================
+  # AIRFLOW WEB
+  # =========================
+  airflow-webserver:
+    <<: *airflow-common
+    container_name: airflow-webserver
+    command: webserver
+    ports:
+      - "8081:8080"
+    restart: always
+
+  # =========================
+  # AIRFLOW SCHEDULER
+  # =========================
+  airflow-scheduler:
+    <<: *airflow-common
+    container_name: airflow-scheduler
+    command: scheduler
+    restart: always
+
+  # =========================
+  # AIRFLOW INIT (DB + USER)
+  # =========================
+  airflow-init:
+    <<: *airflow-common
+    container_name: airflow-init
+    entrypoint: /bin/bash
+    command: -c "
+      airflow db upgrade &&
+      airflow users create \
+        --username airflow \
+        --password airflow \
+        --firstname Admin \
+        --lastname User \
+        --role Admin \
+        --email admin@example.com
+      "
+    depends_on:
+      airflow-postgres:
+        condition: service_healthy
+    networks:
+      - airflow-net
+    restart: "no"
+
+# =========================
+# VOLUMES
+# =========================
+volumes:
+  postgres-db-volume:
+
+# =========================
+# NETWORKS
+# =========================
+networks:
+  airflow-net:
+    driver: bridge

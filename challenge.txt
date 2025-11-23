@@ -1,0 +1,5 @@
+1. Integrate MinioCheck in Airflow and remove Kafka Producer and Kafka Consumer
+2. Build Airflow data pipeline of batch to process yesterday data
+3. Build Airflow data pipeline every hour to update stream data and load in Snowflake
+4. Visualization with Apache Superset for different stocks, including the main companies for different market segments
+5. Substitute Snowflake by DuckDB

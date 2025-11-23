@@ -1,0 +1,43 @@
+# --- Python ---
+.venv/
+env/
+venv/
+
+# --- VSCode ---
+.vscode/
+
+# --- Logs ---
+*.log
+logs/
+**/logs/
+
+# --- Airflow ---
+airflow/
+src/airflow/logs/
+
+# --- Docker volumes ---
+data/
+docker-data/
+tmp/
+
+# --- MinIO ---
+data/minio/
+
+# --- Kafka ---
+data/kafka/
+
+# --- Zookeeper ---
+data/zookeeper/
+
+# --- Spark ---
+data/spark/
+spark-warehouse/
+metastore_db/
+
+# --- OS Files ---
+Thumbs.db
+.DS_Store
+
+# --- OneDrive temporary ---
+~$*
+*.tmp
