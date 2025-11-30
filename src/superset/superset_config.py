@@ -1,0 +1,10 @@
+import os
+
+SECRET_KEY = os.environ.get("SUPERSET_SECRET_KEY", "supersecret")
+SQLALCHEMY_DATABASE_URI = os.environ.get("SQLALCHEMY_DATABASE_URI")
+
+FEATURE_FLAGS = {
+    "ENABLE_TEMPLATE_PROCESSING": True,
+}
+
+WTF_CSRF_ENABLED = False
