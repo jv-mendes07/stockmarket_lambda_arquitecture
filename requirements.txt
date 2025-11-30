@@ -16,6 +16,7 @@ yfinance
 minio
 
 fastparquet
+fastavro
 pyarrow
 boto3
 snowflake
