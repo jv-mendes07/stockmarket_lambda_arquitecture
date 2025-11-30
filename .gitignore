@@ -6,6 +6,10 @@ venv/
 # --- VSCode ---
 .vscode/
 
+# --- Env files ---
+.env
+*.env
+
 # --- Logs ---
 *.log
 logs/
