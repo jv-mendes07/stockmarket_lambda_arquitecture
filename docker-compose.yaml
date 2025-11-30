@@ -11,7 +11,7 @@ x-airflow-common: &airflow-common
     AIRFLOW__CORE__FERNET_KEY: ''
     AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
     AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
-    _PIP_ADDITIONAL_REQUIREMENTS: ${_PIP_ADDITIONAL_REQUIREMENTS:- pandas confluent-kafka yfinance boto3 snowflake-connector-python minio}
+    _PIP_ADDITIONAL_REQUIREMENTS: ${_PIP_ADDITIONAL_REQUIREMENTS:- pandas confluent-kafka yfinance boto3 snowflake-connector-python minio fastavro}
     MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY}
     MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
     MINIO_BUCKET: ${MINIO_BUCKET}
@@ -204,7 +204,7 @@ services:
       MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY}
       MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
       MINIO_BUCKET: ${MINIO_BUCKET}
-      MINIO_ENDPOINT: ${MINIO_ENDPOINT_SPARK}
+      MINIO_ENDPOINT: ${MINIO_ENDPOINT}
       SPARK_EXTRA_CLASSPATH: /opt/spark/jars/*
     command: sleep infinity
     depends_on:
@@ -252,7 +252,7 @@ services:
         --lastname User \
         --role Admin \
         --email admin@example.com
-      "
+        "
     depends_on:
       airflow-postgres:
         condition: service_healthy
@@ -260,11 +260,67 @@ services:
       - airflow-net
     restart: "no"
 
+ # =========================
+  # SUPERSET - METADATA DB
+  # =========================
+  superset-postgres:
+    image: postgres:13
+    container_name: superset-postgres
+    restart: always
+    environment:
+      POSTGRES_DB: superset
+      POSTGRES_USER: superset
+      POSTGRES_PASSWORD: superset
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "superset"]
+      interval: 5s
+      retries: 5
+    volumes:
+      - superset-db-volume:/var/lib/postgresql/data
+    networks:
+      - airflow-net
+
+  # =========================
+  # SUPERSET
+  # =========================
+  superset:
+    build:
+      context: ./src/superset
+    container_name: superset
+    restart: always
+    depends_on:
+      superset-postgres:
+        condition: service_healthy
+
+    environment:
+      SUPERSET_CONFIG_PATH: /app/pythonpath/superset_config.py
+      SUPERSET_LOAD_EXAMPLES: "no"
+      SUPERSET_SECRET_KEY: "supersecret"
+
+      # ---- Snowflake Credenciais ----
+      SNOWFLAKE_ACCOUNT: ${SNOWFLAKE_ACCOUNT}
+      SNOWFLAKE_USER: ${SNOWFLAKE_USER}
+      SNOWFLAKE_PASSWORD: ${SNOWFLAKE_PASSWORD}
+      SNOWFLAKE_DATABASE: ${SNOWFLAKE_DATABASE}
+      SNOWFLAKE_SCHEMA: ${SNOWFLAKE_SCHEMA}
+      SNOWFLAKE_WAREHOUSE: ${SNOWFLAKE_WAREHOUSE}
+      SNOWFLAKE_ROLE: ${SNOWFLAKE_ROLE}
+
+      SQLALCHEMY_DATABASE_URI: postgresql+psycopg2://superset:superset@superset-postgres:5432/superset
+
+    volumes:
+      - ./src/superset:/app/pythonpath
+    ports:
+      - "8088:8088"
+    networks:
+      - airflow-net
+
 # =========================
 # VOLUMES
 # =========================
 volumes:
   postgres-db-volume:
+  superset-db-volume:
 
 # =========================
 # NETWORKS

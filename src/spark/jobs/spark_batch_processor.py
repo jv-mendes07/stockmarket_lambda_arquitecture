@@ -33,7 +33,12 @@ def create_spark_session():
 
     spark = (SparkSession.builder
              .appName("StockMarketBatchProcessor")
-             .config("spark.jars.packages", "org.apache.hadoop:hadoop-aws:3.3.1,com.amazonaws:aws-java-sdk-bundle:1.11.901")
+             .config(
+                "spark.jars",
+                "jars/hadoop-aws-3.3.2.jar,"
+                "jars/aws-java-sdk-bundle-1.12.262.jar,"
+                "jars/spark-avro_2.12-3.4.2.jar"
+                )
              .getOrCreate())
     
     spark_conf = spark.sparkContext._jsc.hadoopConfiguration()
@@ -64,10 +69,38 @@ def read_data_from_s3(spark, date=None):
 
     s3_path = f"s3a://{MINIO_BUCKET}/raw/historical/year={year}/month={month:02d}/day={day:02d}/"
 
+    sc = spark.sparkContext
+    hadoop_conf = sc._jsc.hadoopConfiguration()
+
+    # Import - Java Classes
+    Path = sc._jvm.org.apache.hadoop.fs.Path
+    FileSystem = sc._jvm.org.apache.hadoop.fs.FileSystem
+
+    # FileSystem MinIO/S3A
+    fs = FileSystem.get(Path(s3_path).toUri(), hadoop_conf)
+
+    files = []
+    status_list = fs.listStatus(Path(s3_path))
+
+    for status in status_list:
+        name = status.getPath().toString()
+
+        # .avro files
+        if name.endswith(".avro") and status.isFile():
+            files.append(name)
+
+    logger.info(f"Files found: {files}")
+
+    if not files:
+        logger.info("No Avro files found.")
+        return None
+
     logger.info(f"Reading data from: {s3_path}")
 
     try:
-        df = spark.read.option("header", "true").option("inferSchema", "true").csv(s3_path)
+
+        df = spark.read.format("avro").load(files)
+
         print("Sample data:")
         df.show(5, truncate=False)
         df.printSchema()

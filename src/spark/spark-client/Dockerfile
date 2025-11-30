@@ -21,6 +21,7 @@ RUN pip3 install --no-cache-dir -r /tmp/requirements.txt
 
 ENV PYSPARK_PYTHON=/usr/bin/python3
 ENV PYSPARK_DRIVER_PYTHON=/usr/bin/python3
+ENV SPARK_JARS_PACKAGES="org.apache.spark:spark-avro_2.12:3.4.2"
 
 COPY jars/*.jar /opt/spark/jars/
 RUN chown -R 1001:1001 /opt/spark/jars
