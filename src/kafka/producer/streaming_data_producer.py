@@ -4,12 +4,15 @@ import os
 import random
 import time 
 from datetime import datetime
+import pytz
 
 import pandas as pd
-import yfinance as yf
 from confluent_kafka import Producer
 from dotenv import load_dotenv
 from typing import Optional
+from alpaca.data import StockHistoricalDataClient
+from alpaca.data.requests import StockBarsRequest
+from alpaca.data.timeframe import TimeFrame
 
 #Load Env Variables
 load_dotenv()
@@ -26,17 +29,19 @@ logger = logging.getLogger(__name__)
 KAFKA_BOOTSTRAP_SERVER=os.getenv('KAFKA_BOOTSTRAP_SERVER')
 KAFKA_TOPIC_REALTIME=os.getenv('KAFKA_TOPIC_REALTIME')
 
-# Define stocks with initial prices
-STOCKS = {
-    'AAPL': 180.0, # Apple
-    'MSFT': 350.0, # Microsoft
-    'GOOGL': 130.0, # Alphabet (Google)
-    'AMZN': 130.0, # Amazon
-    'META': 300.0, # Meta (Facebook)
-    'TSLA': 200.0, # Tesla
-    'NVDA': 400.0, # NVIDIA
-    'INTC': 35.0, # Intel
-}
+#Define stocks to collect for realtime data
+STOCKS = [
+    "AAPL",
+    "MSFT",
+    "GOOGL",
+    "AMZN",
+    "META",
+    "TSLA",
+    "NVDA",
+    "INTC",
+    "JPM",
+    "V"
+]
 
 class StreamDataCollector:
     def __init__(self, bootstrap_servers=KAFKA_BOOTSTRAP_SERVER, topic=KAFKA_TOPIC_REALTIME, interval=30):
@@ -65,93 +70,106 @@ class StreamDataCollector:
         else:
             self.logger.info(f"Message delivered successfully to topic {msg.topic} [{msg.partition()}]")
 
-    def generate_stock_data(self, symbol):
-        current_price = self.current_stocks[symbol]
-
-        market_factor = random.uniform(-0.005, 0.005) # market wide movement
-        stock_factor = random.uniform(-0.005, 0.005) # stock specific movement
-
-        change_pct = market_factor + stock_factor
-
-        if random.random() < 0.05:
-            stock_factor += random.uniform(-0.02, 0.02)
-
-        new_price = round(current_price * (1+change_pct), 2)
-
-        self.current_stocks[symbol] = new_price
-
-        #calculate percent change
-        price_change = round(new_price - current_price, 2)
-        percent_change = round((price_change / current_price) * 100, 2)
-
-        volume = random.randint(1000, 100000)
-
-        stock_data = {
-            "symbol": symbol,
-            "price": new_price,
-            "change": price_change,
-            "percent_change": percent_change,
-            "volume": volume,
-            "timestamp": datetime.now().isoformat()
-        }
-
-        return stock_data
-
-    def produce_stock_data(self):
-        """Main function to continuously produce stock data."""
-        self.logger.info(f"Starting continuous stock data production")
-
+    def fetch_realtime_data(self, symbol:str):
         try:
-            while True:
-                # Track successful and failed symbols
-                successful_symbols = 0
-                failed_symbols = 0
+            self.logger.info(f"Fetching realtime data for {symbol}")
 
-                # Fetch and produce data for each stock
-                for symbol in self.current_stocks.keys():
-                    try:
-                        # Generate stock data
-                        stock_data = self.generate_stock_data(symbol)
+            API_KEY = os.getenv('ALPACA_API_KEY')
+            SECRET_KEY = os.getenv('ALPACA_SECRET_KEY')
 
-                        if stock_data:
-                            # Convert to JSON string
-                            message = json.dumps(stock_data)
+            client = StockHistoricalDataClient(API_KEY, SECRET_KEY)
 
-                            # Publish to Kafka topic
-                            self.producer.produce(
-                                self.topic,
-                                key=symbol,
-                                value=message,
-                                callback=self.delivery_report
-                            )
+            market_tz = pytz.timezone("America/New_York")
 
-                            #Trigger message delivery
-                            self.producer.poll(0)
+            start = market_tz.localize(datetime(2025, 12, 8, 9, 30)) # Open
+            end   = market_tz.localize(datetime(2025, 12, 12, 16, 0)) # End
 
-                            successful_symbols += 1
+            request_params = StockBarsRequest(
+                    symbol_or_symbols=symbol,
+                    timeframe=TimeFrame.Minute,
+                    start=start,
+                    end=end
+                )
 
-                        else:
-                            failed_symbols += 1
+            bars = client.get_stock_bars(request_params)
 
-                    except Exception as e:
-                        self.logger.error(f"Error processing {symbol}: {e}")
-                        failed_symbols += 1
+            df = bars.df
 
-                # Log summary of data generation
-                self.logger.info(f"Data Generation Summary: Successful: {successful_symbols}, Failed: {failed_symbols}")
+            df = df.reset_index()
 
-                # Wait before next iteration
-                self.logger.info(f"Waiting {self.interval} seconds before next data generation...")
-                time.sleep(self.interval)
+            df["timestamp"] = [row.to_pydatetime().isoformat() for row in df['timestamp']]
 
-        except KeyboardInterrupt:
-            self.logger.info("Producer stopped by user")
+            self.logger.info(f"Successfully fetched {len(df)} days of data for {symbol}")
+
+            return df
+
         except Exception as e:
-            self.logger.error(f"Unexpected error: {e}")
-        finally:
-            self.logger.info("Producer shutting down")
-            self.producer.flush()
+            self.logger.error(f"Failed to fetch realtime data for {symbol} {e}")
+            return None
+        
+    def producer_to_kafka(self, df: pd.DataFrame, symbol = str):
+        
+        batch_id = datetime.now().strftime("%Y%m%d%H%M%S")
+        df["batch_id"] = batch_id
+        df["batch_date"] = datetime.now().strftime("%Y-%m-%d")
 
+        records = df.to_dict(orient="records")
+
+        successful_records = 0
+        failed_records = 0
+
+        for record in records:
+
+            try:
+                data = json.dumps(record)
+
+                self.producer.produce(
+                    topic=self.topic,
+                    key=symbol,
+                    value=data,
+                    callback=self.delivery_report
+                )
+
+                self.producer.poll(0)
+
+                successful_records += 1
+
+            except Exception as e:
+                self.logger.error(f"Failed to produce message for {symbol} {e}")
+                failed_records += 1
+
+            self.producer.flush()
+            self.logger.info(f"Successfully produced {successful_records} records for {symbol} and failed {failed_records}")
+        
+    def collect_realtime_data(self):
+        symbols = STOCKS
+
+        self.logger.info(f"Starting realtime data collection for {len(symbols)} symbols")
+
+        successul_symbols = 0
+        failed_symbols = 0
+
+        for symbol in symbols:
+            try:
+                #Fetch realtime data
+                df = self.fetch_realtime_data(symbol)
+
+                print(df.head(5))
+
+                if df is not None and not df.empty:
+                    self.producer_to_kafka(df, symbol)
+                    successul_symbols += 1
+                else:
+                    self.logger.warning(f"No data returned for {symbol}")
+                    failed_symbols += 1
+            except Exception as e:
+                self.logger.error(f"Error processing {symbol}: {e}")
+                failed_symbols += 1
+
+            time.sleep(1)
+
+        self.logger.info(f"Realtime data collection completed. Successful: {successul_symbols}, Failed: {failed_symbols}")
+    
 def main():
     """Main function to run the Kafka Producer"""
     try:
@@ -164,7 +182,7 @@ def main():
         )
 
         # start producing stock data
-        producer.produce_stock_data()
+        producer.collect_realtime_data()
 
     except Exception as e:
         logger.error(f"Fatal error: {e}")
