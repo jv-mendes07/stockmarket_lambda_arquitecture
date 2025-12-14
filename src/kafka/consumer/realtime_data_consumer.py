@@ -6,6 +6,7 @@ import time
 
 from io import StringIO, BytesIO
 from datetime import datetime
+from fastavro import writer, parse_schema
 
 import pandas as pd
 import numpy as np 
@@ -39,7 +40,25 @@ messages = []
 MINIO_ACCESS_KEY=os.getenv("MINIO_ACCESS_KEY")
 MINIO_SECRET_KEY=os.getenv("MINIO_SECRET_KEY")
 MINIO_BUCKET=os.getenv("MINIO_BUCKET")
-MINIO_ENDPOINT=os.getenv("MINIO_ENDPOINT")
+MINIO_ENDPOINT="localhost:9000"
+#os.getenv("MINIO_ENDPOINT")
+
+avro_schema = {
+    "type": "record",
+    "name": "StockRecord",
+    "fields": [
+        {"name": "symbol", "type": "string"},
+        {"name": "batch_date", "type": "string"},
+        {"name": "timestamp", "type": ["null", "string"], "default": None},
+        {"name": "open", "type": ["null", "double"], "default": None},
+        {"name": "high", "type": ["null", "double"], "default": None},
+        {"name": "low", "type": ["null", "double"], "default": None},
+        {"name": "close", "type": ["null", "double"], "default": None},
+        {"name": "volume", "type": ["null", "double"], "default": None},
+        {"name": "trade_count", "type": ["null", "double"], "default": None},
+        {"name": "vwap", "type": ["null", "double"], "default": None}
+    ]
+}
 
 def create_minio_client():
     """Initialize MinIO Client"""
@@ -78,12 +97,24 @@ def main():
     consumer = Consumer(conf)
     consumer.subscribe([KAFKA_TOPIC_REALTIME])
 
+    max_empty_polls = 70
+    empty_polls = 0
+
+    parsed_schema = parse_schema(avro_schema)
+
     logger.info(f"Starting consumer topic {KAFKA_TOPIC_REALTIME}")
 
     try:
         while True:
             msg = consumer.poll(timeout=1.0)
             if msg is None:
+                empty_polls += 1
+                logger.info(f"Without message. Try {empty_polls}-{max_empty_polls}")
+
+                if empty_polls >= max_empty_polls:
+                    logger.info("Without new messages. Stopping the Consumer")
+                    break
+
                 continue
             if msg.error():
                 logger.error(f"Consumer error: {msg.error()}")
@@ -92,6 +123,7 @@ def main():
             try:
                 key = msg.key().decode("utf-8") if msg.key() else None
                 value = json.loads(msg.value().decode("utf-8"))
+                symbol = value['symbol']
 
                 messages.append(value)
 
@@ -102,33 +134,34 @@ def main():
 
                 if ((len(messages) >= DEFAULT_BATCH_SIZE) or (current_time - flush_time >= flush_interval and len(messages) > 0)):
 
-                    df = pd.DataFrame(messages)
-
                     now = datetime.now()
                     timestamp = now.strftime('%H%M%S')
 
+                    # Temp file path for AVRO
+                    temp_dir = tempfile.gettempdir()
+                    avro_file = os.path.join(temp_dir, f"{symbol}.avro")
+
+                    # Write AVRO file
+                    with open(avro_file, "wb") as out:
+                        writer(out, parsed_schema, messages)
+
                     #Save to MinIO
 
-                    object_name = f"raw/realtime/year={now.year}/month={now.month:02d}/day={now.day:02d}/hour={now.hour:02d}/stock_data_{timestamp}.csv"
-
-                    csv_buffer = StringIO()
-                    df.to_csv(csv_buffer, index=False)
-                    data_bytes = csv_buffer.getvalue().encode("utf-8")
-                    data_stream = BytesIO(data_bytes)
+                    object_name = f"raw/realtime/{symbol}/year={now.year}/month={now.month:02d}/day={now.day:02d}/hour={now.hour:02d}/minute={now.minute:02d}/{symbol}_{timestamp}.avro"
 
                     try:
 
-                        minio_client.put_object(
-                            MINIO_BUCKET,
-                            object_name=object_name,
-                            data=data_stream,
-                            length=len(data_bytes),
-                            content_type="text/csv"
-                        )
+                        minio_client.fput_object(
+                        MINIO_BUCKET,
+                        object_name=object_name,
+                        file_path=avro_file
+                    )
+
+                        logger.info(f"Wrote data for {symbol} to s3://{MINIO_BUCKET}/{object_name}")
+                    
+                        os.remove(avro_file)
 
                         msg_count = len(messages)
-
-                        logger.info(f"Wrote data for {msg_count} to s3://{MINIO_BUCKET}/{object_name}")
                     
                     except S3Error as e:
                         logger.error(f"Error writing to S3: {e}")

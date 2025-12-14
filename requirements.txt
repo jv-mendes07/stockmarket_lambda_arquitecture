@@ -13,6 +13,9 @@ loguru==0.7.2
 #yahoo finance
 yfinance
 
+#alpaca finance streaming
+alpaca-py
+
 minio
 
 fastparquet
